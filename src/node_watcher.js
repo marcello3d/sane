@@ -49,6 +49,7 @@ function NodeWatcher(dir, opts) {
     this.watchdir,
     this.register,
     this.emit.bind(this, 'ready'),
+    this.emit.bind(this, 'error'),
     this.ignored
   );
 }
@@ -154,14 +155,11 @@ NodeWatcher.prototype.watchdir = function(dir) {
   );
   this.watched[dir] = watcher;
 
-  // Workaround Windows node issue #4337.
-  if (platform === 'win32') {
-    watcher.on('error', function(error) {
-      if (error.code !== 'EPERM') {
-        throw error;
-      }
-    });
-  }
+  watcher.on('error', (function(error) {
+    if (!isIgnorableFileError(error)) {
+      this.emit('error', error);
+    }
+  }).bind(this));
 
   if (this.root !== dir) {
     this.register(dir);
@@ -222,8 +220,7 @@ NodeWatcher.prototype.detectChangedFile = function(dir, event, callback) {
       }
 
       if (error) {
-        if (error.code === 'ENOENT' ||
-            (platform === 'win32' && error.code === 'EPERM')) {
+        if (isIgnorableFileError(error)) {
           found = true;
           callback(file);
         } else {
@@ -341,6 +338,7 @@ NodeWatcher.prototype.emitEvent = function(type, file, stat) {
           this.rawEmitEvent(ADD_EVENT, path.relative(this.root, file), stats);
         }.bind(this),
         function endCallback () {},
+        this.emit.bind(this, 'error'),
         this.ignored
       );
     } else {
@@ -357,6 +355,17 @@ NodeWatcher.prototype.rawEmitEvent = function (type, file, stat) {
   this.emit(ALL_EVENT, type, file, this.root, stat);
 };
 
+
+/**
+ * Determine if a given FS error can be ignored
+ *
+ * @private
+ */
+function isIgnorableFileError(error) {
+  return error.code === 'ENOENT' ||
+    (platform === 'win32' && error.code === 'EPERM');
+}
+
 /**
  * Traverse a directory recursively calling `callback` on every directory.
  *
@@ -368,13 +377,19 @@ NodeWatcher.prototype.rawEmitEvent = function (type, file, stat) {
  * @private
  */
 
-function recReaddir(dir, dirCallback, fileCallback, endCallback, ignored) {
+function recReaddir(dir, dirCallback, fileCallback, endCallback,
+    errorCallback, ignored) {
   walker(dir)
     .filterDir(function(currentDir) {
       return !anymatch(ignored, currentDir);
     })
     .on('dir', normalizeProxy(dirCallback))
     .on('file', normalizeProxy(fileCallback))
+    .on('error', function(error) {
+      if (!isIgnorableFileError(error)) {
+        errorCallback(error);
+      }
+    })
     .on('end', function() {
       if (platform === 'win32') {
         setTimeout(endCallback, 1000);
